@@ -100,7 +100,7 @@ void *ffi_prep_args(char *stack, extended_cif *ecif)
       count += z;
     }
 
-  return (stack + ((count > 24) ? 24 : FFI_ALIGN_DOWN(count, 8)));
+  return (stack + ((count > 24) ? 24 : ALIGN_DOWN(count, 8)));
 }
 
 /* Perform machine dependent cif processing */
@@ -215,18 +215,7 @@ void ffi_closure_eabi (unsigned arg1, unsigned arg2, unsigned arg3,
 	  break;
 	default:
 	  /* This is an 8-byte value.  */
-	  if (ptr == (char *) &register_args[5])
-	    {
-	      /* The value is split across two locations */
-	      unsigned *ip = alloca(8);
-	      avalue[i] = ip;
-	      ip[0] = *(unsigned *) ptr;
-	      ip[1] = *(unsigned *) stack_args;
-	    }
-	  else
-	    {
-	      avalue[i] = ptr;
-	    }
+	  avalue[i] = ptr;
 	  ptr += 4;
 	  break;
 	}
@@ -234,9 +223,9 @@ void ffi_closure_eabi (unsigned arg1, unsigned arg2, unsigned arg3,
 
       /* If we've handled more arguments than fit in registers,
 	 start looking at the those passed on the stack.  */
-      if (ptr == (char *) &register_args[6])
+      if (ptr == &register_args[6])
 	ptr = stack_args;
-      else if (ptr == (char *) &register_args[7])
+      else if (ptr == &register_args[7])
 	ptr = stack_args + 4;
     }
 

@@ -2,9 +2,32 @@
 // Reference:
 //   http://www.bufferoverflow.ch/cgi-bin/dwww/usr/share/doc/libffi5/html/The-Closure-API.html
 
+#include <node.h>
+#include <node_buffer.h>
+#include <node_version.h>
 #include "ffi.h"
 
-namespace FFI {
+#if !(NODE_VERSION_AT_LEAST(0, 11, 15))
+  #ifdef WIN32
+    int uv_thread_equal(const uv_thread_t* t1, const uv_thread_t* t2) {
+      return *t1 == *t2;
+    }
+  #else
+    #include <pthread.h>
+    int uv_thread_equal(const uv_thread_t* t1, const uv_thread_t* t2) {
+      return pthread_equal(*t1, *t2);
+    }
+  #endif
+#endif
+
+#ifdef WIN32
+DWORD CallbackInfo::g_threadID;
+#else
+uv_thread_t CallbackInfo::g_mainthread;
+#endif
+uv_mutex_t    CallbackInfo::g_queue_mutex;
+std::queue<ThreadedCallbackInvokation *> CallbackInfo::g_queue;
+uv_async_t         CallbackInfo::g_async;
 
 /*
  * Called when the `ffi_closure *` pointer (actually the "code" pointer) get's
@@ -13,10 +36,12 @@ namespace FFI {
  * then finally free the struct.
  */
 
-void closure_pointer_cb(Env env, char* data, callback_info* hint) {
-  callback_info* info = static_cast<callback_info*>(hint);
+void closure_pointer_cb(char *data, void *hint) {
+  callback_info *info = reinterpret_cast<callback_info *>(hint);
+  // dispose of the Persistent function reference
+  delete info->function;
+  info->function = NULL;
   // now we can free the closure data
-  info->~callback_info();
   ffi_closure_free(info);
 }
 
@@ -24,55 +49,52 @@ void closure_pointer_cb(Env env, char* data, callback_info* hint) {
  * Invokes the JS callback function.
  */
 
-void CallbackInfo::DispatchToV8(callback_info* info, void* retval, void** parameters, bool dispatched) {
-  Env env = info->instance_data->env;
-  HandleScope handle_scope(env);
+void CallbackInfo::DispatchToV8(callback_info *info, void *retval, void **parameters, bool dispatched) {
+  Nan::HandleScope scope;
 
-  static const char* errorMessage =
-      "ffi fatal: callback has been garbage collected!";
+  static const char* errorMessage = "ffi fatal: callback has been garbage collected!";
 
-  try {
-    if (info->function.IsEmpty() || info->function.Value().IsEmpty()) {
-      // throw an error instead of segfaulting.
-      // see: https://github.com/rbranson/node-ffi/issues/72
+  if (info->function == NULL) {
+    // throw an error instead of segfaulting.
+    // see: https://github.com/rbranson/node-ffi/issues/72
+    if (dispatched) {
+        Local<Value> errorFunctionArgv[1];
+        errorFunctionArgv[0] = Nan::New<String>(errorMessage).ToLocalChecked();
+        info->errorFunction->Call(1, errorFunctionArgv);
+    }
+    else {
+      Nan::ThrowError(errorMessage);
+    }
+  } else {
+    // invoke the registered callback function
+    Local<Value> functionArgv[2];
+    functionArgv[0] = WrapPointer((char *)retval, info->resultSize);
+    functionArgv[1] = WrapPointer((char *)parameters, sizeof(char *) * info->argc);
+    Local<Value> e = info->function->Call(2, functionArgv);
+    if (!e->IsUndefined()) {
       if (dispatched) {
-        info->errorFunction.MakeCallback(Object::New(env),
-                                         { String::New(env, errorMessage) });
+        Local<Value> errorFunctionArgv[1];
+        errorFunctionArgv[0] = e;
+        info->errorFunction->Call(1, errorFunctionArgv);
       } else {
-        throw Error::New(env, errorMessage);
-      }
-    } else {
-      // invoke the registered callback function
-      Value e = info->function.MakeCallback(Object::New(env), {
-        WrapPointer(env, retval, info->resultSize),
-        WrapPointer(env, parameters, sizeof(char*) * info->argc)
-      });
-      if (!e.IsUndefined()) {
-        if (dispatched) {
-          info->errorFunction.Call({ e });
-        } else {
-          throw Error::New(env, e.ToString());
-        }
+        Nan::ThrowError(e);
       }
     }
-  } catch (Error& err) {
-    err.ThrowAsJavaScriptException();
   }
 }
 
-void CallbackInfo::WatcherCallback(uv_async_t* w) {
-  InstanceData* data = static_cast<InstanceData*>(w->data);
-  uv_mutex_lock(&data->mutex);
+void CallbackInfo::WatcherCallback(uv_async_t *w, int revents) {
+  uv_mutex_lock(&g_queue_mutex);
 
-  while (!data->queue.empty()) {
-    ThreadedCallbackInvokation* inv = data->queue.front();
-    data->queue.pop();
+  while (!g_queue.empty()) {
+    ThreadedCallbackInvokation *inv = g_queue.front();
+    g_queue.pop();
 
     DispatchToV8(inv->m_cbinfo, inv->m_retval, inv->m_parameters, true);
     inv->SignalDoneExecuting();
   }
 
-  uv_mutex_unlock(&data->mutex);
+  uv_mutex_unlock(&g_queue_mutex);
 }
 
 /*
@@ -80,37 +102,33 @@ void CallbackInfo::WatcherCallback(uv_async_t* w) {
  * executable C function pointer as a node Buffer instance.
  */
 
-Value CallbackInfo::Callback(const Napi::CallbackInfo& args) {
-  Env env = args.Env();
-
-  if (args.Length() != 5 || !args[0].IsBuffer() ||
-      !args[3].IsFunction() || !args[4].IsFunction()) {
-    throw Error::New(env, "Signature: Buffer, int, int, Function, Function");
+NAN_METHOD(CallbackInfo::Callback) {
+  if (info.Length() != 5) {
+    return THROW_ERROR_EXCEPTION("Not enough arguments.");
   }
 
   // Args: cif pointer, JS function
-  ffi_cif* cif = GetBufferData<ffi_cif>(args[0]);
-  size_t resultSize = args[1].ToNumber().Int32Value();
-  int32_t argc = args[2].ToNumber();
-  Function errorReportCallback = args[3].As<Function>();
-  Function callback = args[4].As<Function>();
+  // TODO: Check args
+  ffi_cif *cif = (ffi_cif *)Buffer::Data(info[0]->ToObject());
+  size_t resultSize = info[1]->Int32Value();
+  int argc = info[2]->Int32Value();
+  Local<Function> errorReportCallback = Local<Function>::Cast(info[3]);
+  Local<Function> callback = Local<Function>::Cast(info[4]);
 
-  callback_info* cbInfo;
+  callback_info *cbInfo;
   ffi_status status;
-  void* code;
+  void *code;
 
-  void* storage = ffi_closure_alloc(sizeof(callback_info), &code);
-  if (storage == nullptr) {
-    throw Error::New(env, "ffi_closure_alloc() Returned Error");
+  cbInfo = reinterpret_cast<callback_info *>(ffi_closure_alloc(sizeof(callback_info), &code));
+
+  if (!cbInfo) {
+    return THROW_ERROR_EXCEPTION("ffi_closure_alloc() Returned Error");
   }
-
-  cbInfo = new(storage) callback_info();
 
   cbInfo->resultSize = resultSize;
   cbInfo->argc = argc;
-  cbInfo->errorFunction = Reference<Function>::New(errorReportCallback, 1);
-  cbInfo->function = Reference<Function>::New(callback, 1);
-  cbInfo->instance_data = InstanceData::Get(env);
+  cbInfo->errorFunction = new Nan::Callback(errorReportCallback);
+  cbInfo->function = new Nan::Callback(callback);
 
   // store a reference to the callback function pointer
   // (not sure if this is actually needed...)
@@ -119,24 +137,21 @@ Value CallbackInfo::Callback(const Napi::CallbackInfo& args) {
   //CallbackInfo *self = new CallbackInfo(callback, closure, code, argc);
 
   status = ffi_prep_closure_loc(
-    &cbInfo->closure,
+    (ffi_closure *)cbInfo,
     cif,
     Invoke,
-    static_cast<void*>(cbInfo),
+    (void *)cbInfo,
     code
   );
 
   if (status != FFI_OK) {
     ffi_closure_free(cbInfo);
-    Error e = Error::New(env, "ffi_prep_closure() Returned Error");
-    e.Set("status", Number::New(env, status));
-    throw e;
+    return THROW_ERROR_EXCEPTION_WITH_STATUS_CODE("ffi_prep_closure() Returned Error", status);
   }
 
-  TypedArray ret = WrapPointer(env, code, sizeof(void*));
-  ret.ArrayBuffer().
-      AddFinalizer(closure_pointer_cb, static_cast<char*>(code), cbInfo);
-  return ret;
+  info.GetReturnValue().Set(
+    Nan::NewBuffer((char *)code, sizeof(void*), closure_pointer_cb, cbInfo).ToLocalChecked()
+  );
 }
 
 /*
@@ -144,42 +159,45 @@ Value CallbackInfo::Callback(const Napi::CallbackInfo& args) {
  * executed.
  */
 
-void CallbackInfo::Invoke(ffi_cif* cif,
-                          void* retval,
-                          void** parameters,
-                          void* user_data) {
-  callback_info* info = static_cast<callback_info*>(user_data);
-  InstanceData* data = info->instance_data;
-#ifdef WIN32
-  if (data->thread == GetCurrentThreadId()) {
-#else
+void CallbackInfo::Invoke(ffi_cif *cif, void *retval, void **parameters, void *user_data) {
+  callback_info *info = reinterpret_cast<callback_info *>(user_data);
+
   // are we executing from another thread?
-  uv_thread_t self_thread = uv_thread_self();
-  if (uv_thread_equal(&self_thread, &data->thread)) {
+#ifdef WIN32
+  if (g_threadID == GetCurrentThreadId()) {
+#else
+  uv_thread_t self_thread = (uv_thread_t) uv_thread_self();
+  if (uv_thread_equal(&self_thread, &g_mainthread)) {
 #endif
     DispatchToV8(info, retval, parameters);
   } else {
     // hold the event loop open while this is executing
-    // TODO: REF()ING FROM A DIFFERENT IS AN INHERENT RACE CONDITION AND THIS
-    // CODE SHOULD NEVER HAVE BEEN WRITTEN
-    uv_ref(reinterpret_cast<uv_handle_t*>(&data->async));
+#if NODE_VERSION_AT_LEAST(0, 7, 9)
+    uv_ref((uv_handle_t *)&g_async);
+#else
+    uv_ref(uv_default_loop());
+#endif
 
     // create a temporary storage area for our invokation parameters
-    std::unique_ptr<ThreadedCallbackInvokation> inv (
-        new ThreadedCallbackInvokation(info, retval, parameters));
+    ThreadedCallbackInvokation *inv = new ThreadedCallbackInvokation(info, retval, parameters);
 
     // push it to the queue -- threadsafe
-    uv_mutex_lock(&data->mutex);
-    data->queue.push(inv.get());
-    uv_mutex_unlock(&data->mutex);
+    uv_mutex_lock(&g_queue_mutex);
+    g_queue.push(inv);
+    uv_mutex_unlock(&g_queue_mutex);
 
     // send a message to our main thread to wake up the WatchCallback loop
-    uv_async_send(&data->async);
+    uv_async_send(&g_async);
 
     // wait for signal from calling thread
     inv->WaitForExecution();
 
-    uv_unref(reinterpret_cast<uv_handle_t*>(&data->async));
+#if NODE_VERSION_AT_LEAST(0, 7, 9)
+    uv_unref((uv_handle_t *)&g_async);
+#else
+    uv_unref(uv_default_loop());
+#endif
+    delete inv;
   }
 }
 
@@ -187,25 +205,25 @@ void CallbackInfo::Invoke(ffi_cif* cif,
  * Init stuff.
  */
 
-Function CallbackInfo::Initialize(Env env) {
-  Function fn = Function::New(env, Callback);
+void CallbackInfo::Initialize(Handle<Object> target) {
+  Nan::HandleScope scope;
 
-  InstanceData* instance_data = InstanceData::Get(env);
+	Nan::Set(target, Nan::New<String>("Callback").ToLocalChecked(),
+		Nan::New<FunctionTemplate>(Callback)->GetFunction());
+
   // initialize our threaded invokation stuff
 #ifdef WIN32
-  instance_data->thread = GetCurrentThreadId();
+  g_threadID = GetCurrentThreadId();
 #else
-  instance_data->thread = uv_thread_self();
+  g_mainthread = (uv_thread_t) uv_thread_self();
 #endif
-  uv_loop_t* loop = nullptr;
-  napi_get_uv_event_loop(env, &loop);
-  uv_async_init(loop, &instance_data->async, CallbackInfo::WatcherCallback);
-  instance_data->async.data = instance_data;
-  uv_mutex_init(&instance_data->mutex);
+  uv_async_init(uv_default_loop(), &g_async, (uv_async_cb) CallbackInfo::WatcherCallback);
+  uv_mutex_init(&g_queue_mutex);
 
   // allow the event loop to exit while this is running
-  uv_unref(reinterpret_cast<uv_handle_t*>(&instance_data->async));
-  return fn;
-}
-
+#if NODE_VERSION_AT_LEAST(0, 7, 9)
+  uv_unref((uv_handle_t *)&g_async);
+#else
+  uv_unref(uv_default_loop());
+#endif
 }

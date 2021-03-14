@@ -25,7 +25,6 @@
    DEALINGS IN THE SOFTWARE.
    ----------------------------------------------------------------------- */
 
-#ifdef __arm__
 #define LIBFFI_ASM
 #include <fficonfig.h>
 #include <ffi.h>
@@ -378,7 +377,6 @@ ARM_FUNC_START(ffi_arm_trampoline)
 ARM_FUNC_END(ffi_arm_trampoline)
 
 #endif /* FFI_EXEC_TRAMPOLINE_TABLE */
-#endif /* __arm__ */
 
 #if defined __ELF__ && defined __linux__
 	.section	.note.GNU-stack,"",%progbits

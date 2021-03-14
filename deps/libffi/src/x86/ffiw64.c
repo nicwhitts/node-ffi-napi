@@ -25,7 +25,6 @@
    DEALINGS IN THE SOFTWARE.
    ----------------------------------------------------------------------- */
 
-#if defined(__x86_64__) || defined(_M_AMD64)
 #include <ffi.h>
 #include <ffi_common.h>
 #include <stdlib.h>
@@ -34,7 +33,7 @@
 #ifdef X86_WIN64
 #define EFI64(name) name
 #else
-#define EFI64(name) FFI_HIDDEN name##_efi64
+#define EFI64(name) name##_efi64
 #endif
 
 struct win64_call_frame
@@ -49,7 +48,7 @@ struct win64_call_frame
 extern void ffi_call_win64 (void *stack, struct win64_call_frame *,
 			    void *closure) FFI_HIDDEN;
 
-ffi_status FFI_HIDDEN
+ffi_status
 EFI64(ffi_prep_cif_machdep)(ffi_cif *cif)
 {
   int flags, n;
@@ -307,5 +306,3 @@ ffi_closure_win64_inner(ffi_cif *cif,
   fun (cif, rvalue, avalue, user_data);
   return flags;
 }
-
-#endif /* __x86_64__ */

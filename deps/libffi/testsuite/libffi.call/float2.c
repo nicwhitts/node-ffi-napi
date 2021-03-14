@@ -33,20 +33,19 @@ int main (void)
 
   f = 3.14159;
 
-#if defined(__sun) && defined(__GNUC__)
-  /* long double support under SunOS/gcc is pretty much non-existent.
-     You'll get the odd bus error in library routines like printf() */
-#else
+#if 1
+  /* This is ifdef'd out for now. long double support under SunOS/gcc
+     is pretty much non-existent.  You'll get the odd bus error in library
+     routines like printf().  */
   printf ("%Lf\n", ldblit(f));
 #endif
-
   ld = 666;
   ffi_call(&cif, FFI_FN(ldblit), &ld, values);
 
-#if defined(__sun) && defined(__GNUC__)
-  /* long double support under SunOS/gcc is pretty much non-existent.
-     You'll get the odd bus error in library routines like printf() */
-#else
+#if 1
+  /* This is ifdef'd out for now. long double support under SunOS/gcc
+     is pretty much non-existent.  You'll get the odd bus error in library
+     routines like printf().  */
   printf ("%Lf, %Lf, %Lf, %Lf\n", ld, ldblit(f), ld - ldblit(f), LDBL_EPSILON);
 #endif
 

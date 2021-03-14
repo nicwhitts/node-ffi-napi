@@ -60,7 +60,7 @@ do
   case $1
   in
     --verbose)
-      verbose=1
+      $verbose=1
       shift 1
     ;;
     --version)
@@ -77,16 +77,6 @@ do
     ;;
     -m64)
       ml="ml64" # "$MSVC/x86_amd64/ml64"
-      safeseh=
-      shift 1
-    ;;
-    -marm)
-      ml='armasm'
-      safeseh=
-      shift 1
-    ;;
-    -marm64)
-      ml='armasm64'
       safeseh=
       shift 1
     ;;
@@ -247,7 +237,6 @@ do
       else
         output="-Fe$2"
       fi
-      armasm_output="-o $2"
       if [ -n "$assembly" ]; then
         args="$args $output"
       else
@@ -300,27 +289,13 @@ if [ -n "$assembly" ]; then
     fi
     ppsrc="$outdir/$(basename $src|sed 's/.S$/.asm/g')"
 
-    if [ $ml = "armasm" ]; then
-      defines="$defines -D_M_ARM"
-    fi
-
-    if [ $ml = "armasm64" ]; then
-      defines="$defines -D_M_ARM64"
-    fi
-
     if test -n "$verbose"; then
       echo "$cl -nologo -EP $includes $defines $src > $ppsrc"
     fi
 
     "$cl" -nologo -EP $includes $defines $src > $ppsrc || exit $?
     output="$(echo $output | sed 's%/F[dpa][^ ]*%%g')"
-    if [ $ml = "armasm" ]; then
-      args="-nologo -g -oldit $armasm_output $ppsrc -errorReport:prompt"
-    elif [ $ml = "armasm64" ]; then
-      args="-nologo -g $armasm_output $ppsrc -errorReport:prompt"
-    else
-      args="-nologo $safeseh $single $output $ppsrc"
-    fi
+    args="-nologo $safeseh $single $output $ppsrc"
 
     if test -n "$verbose"; then
       echo "$ml $args"

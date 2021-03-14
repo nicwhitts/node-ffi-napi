@@ -1,4 +1,3 @@
-#ifdef __x86_64__
 #define LIBFFI_ASM
 #include <fficonfig.h>
 #include <ffi.h>
@@ -43,7 +42,6 @@
 
 	.align	8
 	.globl	C(ffi_call_win64)
-	FFI_HIDDEN(C(ffi_call_win64))
 
 	SEH(.seh_proc ffi_call_win64)
 C(ffi_call_win64):
@@ -171,7 +169,6 @@ E(0b, FFI_TYPE_SMALL_STRUCT_4B)
 
 	.align	8
 	.globl	C(ffi_go_closure_win64)
-	FFI_HIDDEN(C(ffi_go_closure_win64))
 
 	SEH(.seh_proc ffi_go_closure_win64)
 C(ffi_go_closure_win64):
@@ -191,7 +188,6 @@ C(ffi_go_closure_win64):
 
 	.align	8
 	.globl	C(ffi_closure_win64)
-	FFI_HIDDEN(C(ffi_closure_win64))
 
 	SEH(.seh_proc ffi_closure_win64)
 C(ffi_closure_win64):
@@ -230,7 +226,6 @@ C(ffi_closure_win64):
 
 	cfi_endproc
 	SEH(.seh_endproc)
-#endif /* __x86_64__ */
 
 #if defined __ELF__ && defined __linux__
 	.section	.note.GNU-stack,"",@progbits
